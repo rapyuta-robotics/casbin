@@ -310,6 +310,10 @@ func (e *Enforcer) SetEffector(eft effector.Effector) {
 	e.eft = eft
 }
 
+func (e *Enforcer) ClearCache() {
+	e.invalidateMatcherMap()
+}
+
 // ClearPolicy clears all policy.
 func (e *Enforcer) ClearPolicy() {
 	e.invalidateMatcherMap()
