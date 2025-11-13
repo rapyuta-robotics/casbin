@@ -41,6 +41,7 @@ type IEnforcer interface {
 	GetRoleManager() rbac.RoleManager
 	SetRoleManager(rm rbac.RoleManager)
 	SetEffector(eft effector.Effector)
+	ClearCache()
 	ClearPolicy()
 	LoadPolicy() error
 	LoadFilteredPolicy(filter interface{}) error

@@ -106,6 +106,12 @@ func (e *SyncedEnforcer) LoadModel() error {
 	return e.Enforcer.LoadModel()
 }
 
+func (e *SyncedEnforcer) ClearCache() {
+	e.m.Lock()
+	defer e.m.Unlock()
+	e.Enforcer.ClearCache()
+}
+
 // ClearPolicy clears all policy.
 func (e *SyncedEnforcer) ClearPolicy() {
 	e.m.Lock()
