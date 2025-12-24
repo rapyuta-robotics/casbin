@@ -55,6 +55,8 @@ type RoleManager interface {
 	AddMatchingFunc(name string, fn MatchingFunc)
 	// AddDomainMatchingFunc adds the domain matching function
 	AddDomainMatchingFunc(name string, fn MatchingFunc)
+	// SetDomainMatchingFunc sets the domain matching function without triggering a rebuild
+	SetDomainMatchingFunc(fn MatchingFunc)
 }
 
 // ConditionalRoleManager provides interface to define the operations for managing roles.
