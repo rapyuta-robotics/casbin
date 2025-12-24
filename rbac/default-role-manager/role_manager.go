@@ -89,29 +89,39 @@ func (r *Role) removeMatches() {
 }
 
 func (r *Role) rangeRoles(fn func(key, value interface{}) bool) {
+	// First iterate all direct roles
 	for name, role := range r.roles {
 		fn(name, role)
-
+	}
+	// Then iterate matched roles of each direct role
+	for _, role := range r.roles {
 		for matchedName, matchedValue := range role.matched {
 			fn(matchedName, matchedValue)
 		}
-
-		for matchedByName, matchedByValue := range role.matchedBy {
-			fn(matchedByName, matchedByValue)
+	}
+	// Then iterate roles of each matchedBy role
+	for _, matchedByRole := range r.matchedBy {
+		for roleName, roleValue := range matchedByRole.roles {
+			fn(roleName, roleValue)
 		}
 	}
 }
 
 func (r *Role) rangeUsers(fn func(key, value interface{}) bool) {
+	// First iterate all direct users
 	for name, user := range r.users {
 		fn(name, user)
-
+	}
+	// Then iterate matched users of each direct user
+	for _, user := range r.users {
 		for matchedName, matchedValue := range user.matched {
 			fn(matchedName, matchedValue)
 		}
-
-		for matchedByName, matchedByValue := range user.matchedBy {
-			fn(matchedByName, matchedByValue)
+	}
+	// Then iterate users of each matchedBy user
+	for _, matchedByUser := range r.matchedBy {
+		for userName, userValue := range matchedByUser.users {
+			fn(userName, userValue)
 		}
 	}
 }
