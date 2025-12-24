@@ -916,6 +916,16 @@ func (e *Enforcer) AddNamedDomainMatchingFunc(ptype, name string, fn rbac.Matchi
 	return false
 }
 
+// SetNamedDomainMatchingFunc sets the domain matching function without triggering a rebuild.
+// Use this when you want to set the matching function before calling BuildRoleLinks manually.
+func (e *Enforcer) SetNamedDomainMatchingFunc(ptype string, fn rbac.MatchingFunc) bool {
+        if rm, ok := e.rmMap[ptype]; ok {
+                rm.SetDomainMatchingFunc(fn)
+                return true
+        }
+        return false
+}
+
 // AddNamedLinkConditionFunc Add condition function fn for Link userName->roleName,
 // when fn returns true, Link is valid, otherwise invalid.
 func (e *Enforcer) AddNamedLinkConditionFunc(ptype, user, role string, fn rbac.LinkConditionFunc) bool {

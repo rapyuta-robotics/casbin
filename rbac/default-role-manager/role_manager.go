@@ -313,6 +313,11 @@ func (rm *RoleManagerImpl) AddDomainMatchingFunc(name string, fn rbac.MatchingFu
 	rm.domainMatchingFunc = fn
 }
 
+// SetDomainMatchingFunc sets the domain matching function without triggering a rebuild.
+func (rm *RoleManagerImpl) SetDomainMatchingFunc(fn rbac.MatchingFunc) {
+	rm.domainMatchingFunc = fn
+}
+
 // SetLogger sets role manager's logger.
 func (rm *RoleManagerImpl) SetLogger(logger log.Logger) {
 	rm.logger = logger
@@ -505,8 +510,21 @@ func (dm *DomainManager) AddDomainMatchingFunc(name string, fn rbac.MatchingFunc
 	dm.rebuild()
 }
 
+// SetDomainMatchingFunc sets the domain matching function without triggering a rebuild.
+// Use this when setting the matching function before BuildRoleLinks is called.
+func (dm *DomainManager) SetDomainMatchingFunc(fn rbac.MatchingFunc) {
+	dm.domainMatchingFunc = fn
+}
+
 // clears the map of RoleManagers.
 func (dm *DomainManager) rebuild() {
+	// Skip rebuild if no role managers exist
+	hasEntries := false
+	dm.rmMap.Range(func(key, value interface{}) bool { hasEntries = true; return false })
+	if !hasEntries {
+		return
+	}
+
 	rmMap := dm.rmMap
 	_ = dm.Clear()
 	rmMap.Range(func(key, value interface{}) bool {
@@ -524,7 +542,9 @@ func (dm *DomainManager) rebuild() {
 // Clear clears all stored data and resets the role manager to the initial state.
 func (dm *DomainManager) Clear() error {
 	dm.rmMap = &sync.Map{}
-	dm.matchingFuncCache = util.NewSyncLRUCache(100)
+	// Always reset the cache to avoid stale domain matching entries
+	// that could cause security issues when projects are moved between orgs
+	dm.matchingFuncCache = util.NewSyncLRUCache(10000)
 	return nil
 }
 
@@ -550,15 +570,32 @@ func (dm *DomainManager) Match(str string, pattern string) bool {
 }
 
 func (dm *DomainManager) rangeAffectedRoleManagers(domain string, fn func(rm *RoleManagerImpl)) {
-	if dm.domainMatchingFunc != nil {
-		dm.rmMap.Range(func(key, value interface{}) bool {
-			domain2 := key.(string)
-			if domain != domain2 && dm.Match(domain2, domain) {
-				fn(value.(*RoleManagerImpl))
-			}
-			return true
-		})
+	if dm.domainMatchingFunc == nil {
+		return
 	}
+
+	// Check cache first for affected domains
+	cacheKey := "affected::" + domain
+	if cached, ok := dm.matchingFuncCache.Get(cacheKey); ok {
+		for _, d := range cached.([]string) {
+			if rm, ok := dm.load(d); ok {
+				fn(rm)
+			}
+		}
+		return
+	}
+
+	// Build list of affected domains and cache it
+	var affected []string
+	dm.rmMap.Range(func(key, value interface{}) bool {
+		domain2 := key.(string)
+		if domain != domain2 && dm.Match(domain2, domain) {
+			affected = append(affected, domain2)
+			fn(value.(*RoleManagerImpl))
+		}
+		return true
+	})
+	dm.matchingFuncCache.Put(cacheKey, affected)
 }
 
 func (dm *DomainManager) load(name interface{}) (value *RoleManagerImpl, ok bool) {
