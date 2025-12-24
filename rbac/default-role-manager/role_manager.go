@@ -205,6 +205,7 @@ func (r *Role) getLinkConditionFuncParams(role *Role, domain string) ([]string, 
 
 // RoleManagerImpl provides a default implementation for the RoleManager interface.
 type RoleManagerImpl struct {
+	mu                 sync.RWMutex
 	allRoles           map[string]*Role
 	maxHierarchyLevel  int
 	matchingFunc       rbac.MatchingFunc
@@ -272,21 +273,25 @@ func (rm *RoleManagerImpl) load(name interface{}) (value *Role, ok bool) {
 }
 
 // loads or creates a role.
+// loads or creates a role.
 func (rm *RoleManagerImpl) getRole(name string) (r *Role, created bool) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
 	var role *Role
 	var ok bool
 
-	if role, ok = rm.load(name); !ok {
+	if role, ok = rm.loadLocked(name); !ok {
 		role = newRole(name)
 		rm.allRoles[name] = role
 
 		if rm.matchingFunc != nil {
-			rm.rangeMatchingRoles(name, false, func(r *Role) bool {
+			rm.rangeMatchingRolesLocked(name, false, func(r *Role) bool {
 				r.addMatch(role)
 				return true
 			})
 
-			rm.rangeMatchingRoles(name, true, func(r *Role) bool {
+			rm.rangeMatchingRolesLocked(name, true, func(r *Role) bool {
 				role.addMatch(r)
 				return true
 			})
@@ -294,6 +299,26 @@ func (rm *RoleManagerImpl) getRole(name string) (r *Role, created bool) {
 	}
 
 	return role, !ok
+}
+
+// loadLocked is load without acquiring the mutex (caller must hold it)
+func (rm *RoleManagerImpl) loadLocked(name string) (value *Role, ok bool) {
+	r, ok := rm.allRoles[name]
+	if ok {
+		return r, true
+	}
+	return nil, false
+}
+
+// rangeMatchingRolesLocked iterates without acquiring mutex (caller must hold it)
+func (rm *RoleManagerImpl) rangeMatchingRolesLocked(name string, isPattern bool, fn func(role *Role) bool) {
+	for name2, value := range rm.allRoles {
+		if isPattern && name != name2 && rm.Match(name2, name) {
+			fn(value)
+		} else if !isPattern && name != name2 && rm.Match(name, name2) {
+			fn(value)
+		}
+	}
 }
 
 func loadAndDelete(m *sync.Map, name string) (value interface{}, loaded bool) {
@@ -305,6 +330,9 @@ func loadAndDelete(m *sync.Map, name string) (value interface{}, loaded bool) {
 }
 
 func (rm *RoleManagerImpl) removeRole(name string) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
 	role, ok := rm.allRoles[name]
 	if !ok {
 		return
@@ -476,6 +504,7 @@ func (rm *RoleManagerImpl) BuildRelationship(name1 string, name2 string, domain 
 }
 
 type DomainManager struct {
+	mu                 sync.RWMutex
 	rmMap              map[string]*RoleManagerImpl
 	maxHierarchyLevel  int
 	matchingFunc       rbac.MatchingFunc
@@ -613,11 +642,16 @@ func (dm *DomainManager) load(name interface{}) (value *RoleManagerImpl, ok bool
 }
 
 // load or create a RoleManager instance of domain.
+// If store is false and domain doesn't exist, returns an empty RoleManager
+// load or create a RoleManager instance of domain.
 func (dm *DomainManager) getRoleManager(domain string, store bool) *RoleManagerImpl {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
 	var rm *RoleManagerImpl
 	var ok bool
 
-	if rm, ok = dm.load(domain); !ok {
+	if rm, ok = dm.loadLocked(domain); !ok {
 		rm = newRoleManagerWithMatchingFunc(dm.maxHierarchyLevel, dm.matchingFunc)
 		if store {
 			dm.rmMap[domain] = rm
@@ -631,6 +665,15 @@ func (dm *DomainManager) getRoleManager(domain string, store bool) *RoleManagerI
 		}
 	}
 	return rm
+}
+
+// loadLocked loads from rmMap without acquiring mutex (caller must hold it)
+func (dm *DomainManager) loadLocked(domain string) (value *RoleManagerImpl, ok bool) {
+	r, ok := dm.rmMap[domain]
+	if ok {
+		return r, true
+	}
+	return nil, false
 }
 
 // AddLink adds the inheritance link between role: name1 and role: name2.

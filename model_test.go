@@ -403,6 +403,7 @@ func (rm *testCustomRoleManager) SetLogger(logger log.Logger) {}
 func (rm *testCustomRoleManager) Match(str string, pattern string) bool                   { return true }
 func (rm *testCustomRoleManager) AddMatchingFunc(name string, fn rbac.MatchingFunc)       {}
 func (rm *testCustomRoleManager) AddDomainMatchingFunc(name string, fn rbac.MatchingFunc) {}
+func (rm *testCustomRoleManager) SetDomainMatchingFunc(fn rbac.MatchingFunc)              {}
 
 func (rm *testCustomRoleManager) AddLinkConditionFunc(userName, roleName string, fn rbac.LinkConditionFunc) {
 }
