@@ -358,6 +358,24 @@ func (rm *RoleManagerImpl) SetDomainMatchingFunc(fn rbac.MatchingFunc) {
 	rm.domainMatchingFunc = fn
 }
 
+// SetAffectedDomainsFunc is a no-op for RoleManagerImpl since it doesn't handle
+// multi-domain scenarios. The DomainManager uses this for optimization.
+func (rm *RoleManagerImpl) SetAffectedDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	// No-op: RoleManagerImpl doesn't need this optimization
+}
+
+// SetParentDomainsFunc is a no-op for RoleManagerImpl since it doesn't handle
+// multi-domain scenarios. The DomainManager uses this for optimization.
+func (rm *RoleManagerImpl) SetParentDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	// No-op: RoleManagerImpl doesn't need this optimization
+}
+
+// SetSkipCopyOnCreate is a no-op for RoleManagerImpl since it doesn't handle
+// multi-domain scenarios. The DomainManager uses this for optimization.
+func (rm *RoleManagerImpl) SetSkipCopyOnCreate(skip bool) {
+	// No-op: RoleManagerImpl doesn't need this optimization
+}
+
 // SetLogger sets role manager's logger.
 func (rm *RoleManagerImpl) SetLogger(logger log.Logger) {
 	rm.logger = logger
@@ -504,13 +522,16 @@ func (rm *RoleManagerImpl) BuildRelationship(name1 string, name2 string, domain 
 }
 
 type DomainManager struct {
-	mu                 sync.RWMutex
-	rmMap              map[string]*RoleManagerImpl
-	maxHierarchyLevel  int
-	matchingFunc       rbac.MatchingFunc
-	domainMatchingFunc rbac.MatchingFunc
-	logger             log.Logger
-	matchingFuncCache  *util.SyncLRUCache
+	mu                  sync.RWMutex
+	rmMap               map[string]*RoleManagerImpl
+	maxHierarchyLevel   int
+	matchingFunc        rbac.MatchingFunc
+	domainMatchingFunc  rbac.MatchingFunc
+	affectedDomainsFunc rbac.AffectedDomainsFunc
+	parentDomainsFunc   rbac.AffectedDomainsFunc // Returns parent domains that a domain should inherit from
+	skipCopyOnCreate    bool                     // If true, skip copyFrom during getRoleManager for performance
+	logger              log.Logger
+	matchingFuncCache   *util.SyncLRUCache
 }
 
 // NewDomainManager is the constructor for creating an instance of the
@@ -548,6 +569,27 @@ func (dm *DomainManager) AddDomainMatchingFunc(name string, fn rbac.MatchingFunc
 // Use this when setting the matching function before BuildRoleLinks is called.
 func (dm *DomainManager) SetDomainMatchingFunc(fn rbac.MatchingFunc) {
 	dm.domainMatchingFunc = fn
+}
+
+// SetAffectedDomainsFunc sets a function that returns affected domains directly.
+// This allows O(1) lookup of affected domains instead of O(n) iteration during
+// role link building.
+func (dm *DomainManager) SetAffectedDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	dm.affectedDomainsFunc = fn
+}
+
+// SetParentDomainsFunc sets a function that returns parent domains that a domain
+// should inherit from. This allows O(1) lookup instead of O(n) iteration during
+// role manager creation.
+func (dm *DomainManager) SetParentDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	dm.parentDomainsFunc = fn
+}
+
+// SetSkipCopyOnCreate enables skipping role copying when creating new domain role managers.
+// This is a performance optimization when inheritance is handled via matching functions
+// and rangeAffectedRoleManagers during AddLink.
+func (dm *DomainManager) SetSkipCopyOnCreate(skip bool) {
+	dm.skipCopyOnCreate = skip
 }
 
 // clears the map of RoleManagers.
@@ -620,7 +662,22 @@ func (dm *DomainManager) rangeAffectedRoleManagers(domain string, fn func(rm *Ro
 		return
 	}
 
-	// Build list of affected domains and cache it
+	// Fast path: use affectedDomainsFunc if available for O(1) lookup
+	// Only process domains that already have role managers
+	if dm.affectedDomainsFunc != nil {
+		affected := dm.affectedDomainsFunc(domain)
+		var actuallyAffected []string
+		for _, d := range affected {
+			if rm, ok := dm.load(d); ok {
+				actuallyAffected = append(actuallyAffected, d)
+				fn(rm)
+			}
+		}
+		dm.matchingFuncCache.Put(cacheKey, actuallyAffected)
+		return
+	}
+
+	// Fallback: iterate through all domains (O(n))
 	var affected []string
 	for domain2, value := range dm.rmMap {
 		if domain != domain2 && dm.Match(domain2, domain) {
@@ -630,6 +687,47 @@ func (dm *DomainManager) rangeAffectedRoleManagers(domain string, fn func(rm *Ro
 	}
 
 	dm.matchingFuncCache.Put(cacheKey, affected)
+}
+
+// getOrCreateRoleManagers gets or creates role managers for multiple domains in a single lock acquisition
+func (dm *DomainManager) getOrCreateRoleManagers(domains []string) []*RoleManagerImpl {
+	if len(domains) == 0 {
+		return nil
+	}
+
+	// First, try to get existing role managers without the write lock
+	dm.mu.RLock()
+	rms := make([]*RoleManagerImpl, 0, len(domains))
+	var missing []string
+	for _, d := range domains {
+		if rm, ok := dm.rmMap[d]; ok {
+			rms = append(rms, rm)
+		} else {
+			missing = append(missing, d)
+		}
+	}
+	dm.mu.RUnlock()
+
+	// If all role managers exist, return immediately
+	if len(missing) == 0 {
+		return rms
+	}
+
+	// Create missing role managers with write lock
+	dm.mu.Lock()
+	for _, d := range missing {
+		// Double-check in case another goroutine created it
+		if rm, ok := dm.rmMap[d]; ok {
+			rms = append(rms, rm)
+		} else {
+			rm := newRoleManagerWithMatchingFunc(dm.maxHierarchyLevel, dm.matchingFunc)
+			dm.rmMap[d] = rm
+			rms = append(rms, rm)
+		}
+	}
+	dm.mu.Unlock()
+
+	return rms
 }
 
 func (dm *DomainManager) load(name interface{}) (value *RoleManagerImpl, ok bool) {
@@ -656,10 +754,23 @@ func (dm *DomainManager) getRoleManager(domain string, store bool) *RoleManagerI
 		if store {
 			dm.rmMap[domain] = rm
 		}
-		if dm.domainMatchingFunc != nil {
-			for domain2, rm2 := range dm.rmMap {
-				if domain != domain2 && dm.Match(domain, domain2) {
-					rm.copyFrom(rm2)
+		// Skip copyFrom if skipCopyOnCreate is enabled for performance optimization
+		// In this mode, inheritance is handled via rangeAffectedRoleManagers during AddLink
+		if dm.domainMatchingFunc != nil && !dm.skipCopyOnCreate {
+			// Fast path: use parentDomainsFunc if available for O(1) lookup
+			if dm.parentDomainsFunc != nil {
+				parents := dm.parentDomainsFunc(domain)
+				for _, parentDomain := range parents {
+					if rm2, ok := dm.rmMap[parentDomain]; ok && parentDomain != domain {
+						rm.copyFrom(rm2)
+					}
+				}
+			} else {
+				// Fallback: iterate through all domains (O(n))
+				for domain2, rm2 := range dm.rmMap {
+					if domain != domain2 && dm.Match(domain, domain2) {
+						rm.copyFrom(rm2)
+					}
 				}
 			}
 		}
@@ -715,7 +826,28 @@ func (dm *DomainManager) HasLink(name1 string, name2 string, domains ...string) 
 		return false, err
 	}
 	rm := dm.getRoleManager(domain, false)
-	return rm.HasLink(name1, name2, domains...)
+	hasLink, err := rm.HasLink(name1, name2, domains...)
+	if err != nil {
+		return false, err
+	}
+	if hasLink {
+		return true, nil
+	}
+
+	// If not found and we have a parentDomainsFunc, check parent domains
+	// This enables lazy inheritance when skipCopyOnCreate is true
+	if dm.parentDomainsFunc != nil {
+		parents := dm.parentDomainsFunc(domain)
+		for _, parentDomain := range parents {
+			if parentRM, ok := dm.load(parentDomain); ok {
+				if hasLink, _ := parentRM.HasLink(name1, name2); hasLink {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	return false, nil
 }
 
 // GetRoles gets the roles that a subject inherits.

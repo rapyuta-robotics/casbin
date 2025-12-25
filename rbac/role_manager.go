@@ -18,6 +18,11 @@ import "github.com/casbin/casbin/v2/log"
 
 type MatchingFunc func(arg1 string, arg2 string) bool
 
+// AffectedDomainsFunc is a function that returns a list of domains that affect
+// the given domain. This is used to optimize domain hierarchy matching by avoiding
+// O(n) iteration through all domains.
+type AffectedDomainsFunc func(domain string) []string
+
 type LinkConditionFunc = func(args ...string) (bool, error)
 
 // RoleManager provides interface to define the operations for managing roles.
@@ -57,6 +62,15 @@ type RoleManager interface {
 	AddDomainMatchingFunc(name string, fn MatchingFunc)
 	// SetDomainMatchingFunc sets the domain matching function without triggering a rebuild
 	SetDomainMatchingFunc(fn MatchingFunc)
+	// SetAffectedDomainsFunc sets a function that returns affected domains directly,
+	// avoiding O(n) iteration during role link building
+	SetAffectedDomainsFunc(fn AffectedDomainsFunc)
+	// SetParentDomainsFunc sets a function that returns parent domains that a domain
+	// should inherit from, avoiding O(n) iteration during role manager creation
+	SetParentDomainsFunc(fn AffectedDomainsFunc)
+	// SetSkipCopyOnCreate enables skipping role copying when creating new domain role managers.
+	// This is a performance optimization when inheritance is handled via matching functions.
+	SetSkipCopyOnCreate(skip bool)
 }
 
 // ConditionalRoleManager provides interface to define the operations for managing roles.

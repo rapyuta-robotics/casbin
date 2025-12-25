@@ -404,6 +404,9 @@ func (rm *testCustomRoleManager) Match(str string, pattern string) bool         
 func (rm *testCustomRoleManager) AddMatchingFunc(name string, fn rbac.MatchingFunc)       {}
 func (rm *testCustomRoleManager) AddDomainMatchingFunc(name string, fn rbac.MatchingFunc) {}
 func (rm *testCustomRoleManager) SetDomainMatchingFunc(fn rbac.MatchingFunc)              {}
+func (rm *testCustomRoleManager) SetAffectedDomainsFunc(fn rbac.AffectedDomainsFunc)      {}
+func (rm *testCustomRoleManager) SetParentDomainsFunc(fn rbac.AffectedDomainsFunc)        {}
+func (rm *testCustomRoleManager) SetSkipCopyOnCreate(skip bool)                           {}
 
 func (rm *testCustomRoleManager) AddLinkConditionFunc(userName, roleName string, fn rbac.LinkConditionFunc) {
 }
