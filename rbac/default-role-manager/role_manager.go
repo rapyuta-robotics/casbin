@@ -29,10 +29,10 @@ const defaultDomain string = ""
 // Role represents the data structure for a role in RBAC.
 type Role struct {
 	name                       string
-	roles                      *sync.Map
-	users                      *sync.Map
-	matched                    *sync.Map
-	matchedBy                  *sync.Map
+	roles                      map[string]*Role
+	users                      map[string]*Role
+	matched                    map[string]*Role
+	matchedBy                  map[string]*Role
 	linkConditionFuncMap       *sync.Map
 	linkConditionFuncParamsMap *sync.Map
 }
@@ -40,82 +40,90 @@ type Role struct {
 func newRole(name string) *Role {
 	r := Role{}
 	r.name = name
-	r.roles = &sync.Map{}
-	r.users = &sync.Map{}
-	r.matched = &sync.Map{}
-	r.matchedBy = &sync.Map{}
+	r.roles = make(map[string]*Role)
+	r.users = make(map[string]*Role)
+	r.matched = make(map[string]*Role)
+	r.matchedBy = make(map[string]*Role)
 	r.linkConditionFuncMap = &sync.Map{}
 	r.linkConditionFuncParamsMap = &sync.Map{}
 	return &r
 }
 
 func (r *Role) addRole(role *Role) {
-	r.roles.Store(role.name, role)
+	r.roles[role.name] = role
 	role.addUser(r)
 }
 
 func (r *Role) removeRole(role *Role) {
-	r.roles.Delete(role.name)
+	delete(r.roles, role.name)
 	role.removeUser(r)
 }
 
 // should only be called inside addRole.
 func (r *Role) addUser(user *Role) {
-	r.users.Store(user.name, user)
+	r.users[user.name] = user
 }
 
 // should only be called inside removeRole.
 func (r *Role) removeUser(user *Role) {
-	r.users.Delete(user.name)
+	delete(r.users, user.name)
 }
 
 func (r *Role) addMatch(role *Role) {
-	r.matched.Store(role.name, role)
-	role.matchedBy.Store(r.name, r)
+	r.matched[role.name] = role
+	role.matchedBy[r.name] = r
 }
 
 func (r *Role) removeMatch(role *Role) {
-	r.matched.Delete(role.name)
-	role.matchedBy.Delete(r.name)
+	delete(r.matched, role.name)
+	delete(role.matchedBy, r.name)
 }
 
 func (r *Role) removeMatches() {
-	r.matched.Range(func(key, value interface{}) bool {
-		r.removeMatch(value.(*Role))
-		return true
-	})
-	r.matchedBy.Range(func(key, value interface{}) bool {
-		value.(*Role).removeMatch(r)
-		return true
-	})
+	for _, m := range r.matched {
+		r.removeMatch(m)
+	}
+	for _, m := range r.matchedBy {
+		m.removeMatch(r)
+	}
 }
 
 func (r *Role) rangeRoles(fn func(key, value interface{}) bool) {
-	r.roles.Range(fn)
-	r.roles.Range(func(key, value interface{}) bool {
-		role := value.(*Role)
-		role.matched.Range(fn)
-		return true
-	})
-	r.matchedBy.Range(func(key, value interface{}) bool {
-		role := value.(*Role)
-		role.roles.Range(fn)
-		return true
-	})
+	// First iterate all direct roles
+	for name, role := range r.roles {
+		fn(name, role)
+	}
+	// Then iterate matched roles of each direct role
+	for _, role := range r.roles {
+		for matchedName, matchedValue := range role.matched {
+			fn(matchedName, matchedValue)
+		}
+	}
+	// Then iterate roles of each matchedBy role
+	for _, matchedByRole := range r.matchedBy {
+		for roleName, roleValue := range matchedByRole.roles {
+			fn(roleName, roleValue)
+		}
+	}
 }
 
 func (r *Role) rangeUsers(fn func(key, value interface{}) bool) {
-	r.users.Range(fn)
-	r.users.Range(func(key, value interface{}) bool {
-		role := value.(*Role)
-		role.matched.Range(fn)
-		return true
-	})
-	r.matchedBy.Range(func(key, value interface{}) bool {
-		role := value.(*Role)
-		role.users.Range(fn)
-		return true
-	})
+	// First iterate all direct users
+	for name, user := range r.users {
+		fn(name, user)
+	}
+	// Then iterate matched users of each direct user
+	for _, user := range r.users {
+		for matchedName, matchedValue := range user.matched {
+			fn(matchedName, matchedValue)
+		}
+	}
+	// Then iterate users of each matchedBy user
+	for _, matchedByUser := range r.matchedBy {
+		for userName, userValue := range matchedByUser.users {
+			fn(userName, userValue)
+		}
+	}
 }
 
 func (r *Role) toString() string {
@@ -197,7 +205,8 @@ func (r *Role) getLinkConditionFuncParams(role *Role, domain string) ([]string, 
 
 // RoleManagerImpl provides a default implementation for the RoleManager interface.
 type RoleManagerImpl struct {
-	allRoles           *sync.Map
+	mu                 sync.RWMutex
+	allRoles           map[string]*Role
 	maxHierarchyLevel  int
 	matchingFunc       rbac.MatchingFunc
 	domainMatchingFunc rbac.MatchingFunc
@@ -245,40 +254,44 @@ func (rm *RoleManagerImpl) Match(str string, pattern string) bool {
 }
 
 func (rm *RoleManagerImpl) rangeMatchingRoles(name string, isPattern bool, fn func(role *Role) bool) {
-	rm.allRoles.Range(func(key, value interface{}) bool {
-		name2 := key.(string)
+	for name2, value := range rm.allRoles {
 		if isPattern && name != name2 && rm.Match(name2, name) {
-			fn(value.(*Role))
+			fn(value)
 		} else if !isPattern && name != name2 && rm.Match(name, name2) {
-			fn(value.(*Role))
+			fn(value)
 		}
-		return true
-	})
+	}
 }
 
 func (rm *RoleManagerImpl) load(name interface{}) (value *Role, ok bool) {
-	if r, ok := rm.allRoles.Load(name); ok {
-		return r.(*Role), true
+	r, ok := rm.allRoles[name.(string)]
+	if ok {
+		return r, true
 	}
+
 	return nil, false
 }
 
 // loads or creates a role.
+// loads or creates a role.
 func (rm *RoleManagerImpl) getRole(name string) (r *Role, created bool) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
 	var role *Role
 	var ok bool
 
-	if role, ok = rm.load(name); !ok {
+	if role, ok = rm.loadLocked(name); !ok {
 		role = newRole(name)
-		rm.allRoles.Store(name, role)
+		rm.allRoles[name] = role
 
 		if rm.matchingFunc != nil {
-			rm.rangeMatchingRoles(name, false, func(r *Role) bool {
+			rm.rangeMatchingRolesLocked(name, false, func(r *Role) bool {
 				r.addMatch(role)
 				return true
 			})
 
-			rm.rangeMatchingRoles(name, true, func(r *Role) bool {
+			rm.rangeMatchingRolesLocked(name, true, func(r *Role) bool {
 				role.addMatch(r)
 				return true
 			})
@@ -286,6 +299,26 @@ func (rm *RoleManagerImpl) getRole(name string) (r *Role, created bool) {
 	}
 
 	return role, !ok
+}
+
+// loadLocked is load without acquiring the mutex (caller must hold it)
+func (rm *RoleManagerImpl) loadLocked(name string) (value *Role, ok bool) {
+	r, ok := rm.allRoles[name]
+	if ok {
+		return r, true
+	}
+	return nil, false
+}
+
+// rangeMatchingRolesLocked iterates without acquiring mutex (caller must hold it)
+func (rm *RoleManagerImpl) rangeMatchingRolesLocked(name string, isPattern bool, fn func(role *Role) bool) {
+	for name2, value := range rm.allRoles {
+		if isPattern && name != name2 && rm.Match(name2, name) {
+			fn(value)
+		} else if !isPattern && name != name2 && rm.Match(name, name2) {
+			fn(value)
+		}
+	}
 }
 
 func loadAndDelete(m *sync.Map, name string) (value interface{}, loaded bool) {
@@ -297,9 +330,16 @@ func loadAndDelete(m *sync.Map, name string) (value interface{}, loaded bool) {
 }
 
 func (rm *RoleManagerImpl) removeRole(name string) {
-	if role, ok := loadAndDelete(rm.allRoles, name); ok {
-		role.(*Role).removeMatches()
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+
+	role, ok := rm.allRoles[name]
+	if !ok {
+		return
 	}
+
+	delete(rm.allRoles, name)
+	role.removeMatches()
 }
 
 // AddMatchingFunc support use pattern in g.
@@ -313,6 +353,29 @@ func (rm *RoleManagerImpl) AddDomainMatchingFunc(name string, fn rbac.MatchingFu
 	rm.domainMatchingFunc = fn
 }
 
+// SetDomainMatchingFunc sets the domain matching function without triggering a rebuild.
+func (rm *RoleManagerImpl) SetDomainMatchingFunc(fn rbac.MatchingFunc) {
+	rm.domainMatchingFunc = fn
+}
+
+// SetAffectedDomainsFunc is a no-op for RoleManagerImpl since it doesn't handle
+// multi-domain scenarios. The DomainManager uses this for optimization.
+func (rm *RoleManagerImpl) SetAffectedDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	// No-op: RoleManagerImpl doesn't need this optimization
+}
+
+// SetParentDomainsFunc is a no-op for RoleManagerImpl since it doesn't handle
+// multi-domain scenarios. The DomainManager uses this for optimization.
+func (rm *RoleManagerImpl) SetParentDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	// No-op: RoleManagerImpl doesn't need this optimization
+}
+
+// SetSkipCopyOnCreate is a no-op for RoleManagerImpl since it doesn't handle
+// multi-domain scenarios. The DomainManager uses this for optimization.
+func (rm *RoleManagerImpl) SetSkipCopyOnCreate(skip bool) {
+	// No-op: RoleManagerImpl doesn't need this optimization
+}
+
 // SetLogger sets role manager's logger.
 func (rm *RoleManagerImpl) SetLogger(logger log.Logger) {
 	rm.logger = logger
@@ -321,7 +384,7 @@ func (rm *RoleManagerImpl) SetLogger(logger log.Logger) {
 // Clear clears all stored data and resets the role manager to the initial state.
 func (rm *RoleManagerImpl) Clear() error {
 	rm.matchingFuncCache = util.NewSyncLRUCache(100)
-	rm.allRoles = &sync.Map{}
+	rm.allRoles = make(map[string]*Role)
 	return nil
 }
 
@@ -403,13 +466,11 @@ func (rm *RoleManagerImpl) GetUsers(name string, domain ...string) ([]string, er
 func (rm *RoleManagerImpl) toString() []string {
 	var roles []string
 
-	rm.allRoles.Range(func(key, value interface{}) bool {
-		role := value.(*Role)
+	for _, role := range rm.allRoles {
 		if text := role.toString(); text != "" {
 			roles = append(roles, text)
 		}
-		return true
-	})
+	}
 
 	return roles
 }
@@ -443,15 +504,12 @@ func (rm *RoleManagerImpl) copyFrom(other *RoleManagerImpl) {
 	})
 }
 
-func rangeLinks(users *sync.Map, fn func(name1, name2 string, domain ...string) bool) {
-	users.Range(func(_, value interface{}) bool {
-		user := value.(*Role)
-		user.roles.Range(func(key, _ interface{}) bool {
-			roleName := key.(string)
-			return fn(user.name, roleName, defaultDomain)
-		})
-		return true
-	})
+func rangeLinks(users map[string]*Role, fn func(name1, name2 string, domain ...string) bool) {
+	for _, user := range users {
+		for name := range user.roles {
+			fn(user.name, name, defaultDomain)
+		}
+	}
 }
 
 func (rm *RoleManagerImpl) Range(fn func(name1, name2 string, domain ...string) bool) {
@@ -464,12 +522,16 @@ func (rm *RoleManagerImpl) BuildRelationship(name1 string, name2 string, domain 
 }
 
 type DomainManager struct {
-	rmMap              *sync.Map
-	maxHierarchyLevel  int
-	matchingFunc       rbac.MatchingFunc
-	domainMatchingFunc rbac.MatchingFunc
-	logger             log.Logger
-	matchingFuncCache  *util.SyncLRUCache
+	mu                  sync.RWMutex
+	rmMap               map[string]*RoleManagerImpl
+	maxHierarchyLevel   int
+	matchingFunc        rbac.MatchingFunc
+	domainMatchingFunc  rbac.MatchingFunc
+	affectedDomainsFunc rbac.AffectedDomainsFunc
+	parentDomainsFunc   rbac.AffectedDomainsFunc // Returns parent domains that a domain should inherit from
+	skipCopyOnCreate    bool                     // If true, skip copyFrom during getRoleManager for performance
+	logger              log.Logger
+	matchingFuncCache   *util.SyncLRUCache
 }
 
 // NewDomainManager is the constructor for creating an instance of the
@@ -489,42 +551,77 @@ func (dm *DomainManager) SetLogger(logger log.Logger) {
 // AddMatchingFunc support use pattern in g.
 func (dm *DomainManager) AddMatchingFunc(name string, fn rbac.MatchingFunc) {
 	dm.matchingFunc = fn
-	dm.rmMap.Range(func(key, value interface{}) bool {
-		value.(*RoleManagerImpl).AddMatchingFunc(name, fn)
-		return true
-	})
+	for name, value := range dm.rmMap {
+		value.AddMatchingFunc(name, fn)
+	}
 }
 
 // AddDomainMatchingFunc support use domain pattern in g.
 func (dm *DomainManager) AddDomainMatchingFunc(name string, fn rbac.MatchingFunc) {
 	dm.domainMatchingFunc = fn
-	dm.rmMap.Range(func(key, value interface{}) bool {
-		value.(*RoleManagerImpl).AddDomainMatchingFunc(name, fn)
-		return true
-	})
+	for name, value := range dm.rmMap {
+		value.AddDomainMatchingFunc(name, fn)
+	}
 	dm.rebuild()
+}
+
+// SetDomainMatchingFunc sets the domain matching function without triggering a rebuild.
+// Use this when setting the matching function before BuildRoleLinks is called.
+func (dm *DomainManager) SetDomainMatchingFunc(fn rbac.MatchingFunc) {
+	dm.domainMatchingFunc = fn
+}
+
+// SetAffectedDomainsFunc sets a function that returns affected domains directly.
+// This allows O(1) lookup of affected domains instead of O(n) iteration during
+// role link building.
+func (dm *DomainManager) SetAffectedDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	dm.affectedDomainsFunc = fn
+}
+
+// SetParentDomainsFunc sets a function that returns parent domains that a domain
+// should inherit from. This allows O(1) lookup instead of O(n) iteration during
+// role manager creation.
+func (dm *DomainManager) SetParentDomainsFunc(fn rbac.AffectedDomainsFunc) {
+	dm.parentDomainsFunc = fn
+}
+
+// SetSkipCopyOnCreate enables skipping role copying when creating new domain role managers.
+// This is a performance optimization when inheritance is handled via matching functions
+// and rangeAffectedRoleManagers during AddLink.
+func (dm *DomainManager) SetSkipCopyOnCreate(skip bool) {
+	dm.skipCopyOnCreate = skip
 }
 
 // clears the map of RoleManagers.
 func (dm *DomainManager) rebuild() {
+	// Skip rebuild if no role managers exist
+	hasEntries := false
+
+	if len(dm.rmMap) > 0 {
+		hasEntries = true
+	}
+
+	if !hasEntries {
+		return
+	}
+
 	rmMap := dm.rmMap
 	_ = dm.Clear()
-	rmMap.Range(func(key, value interface{}) bool {
-		domain := key.(string)
-		rm := value.(*RoleManagerImpl)
 
+	for domain, rm := range rmMap {
 		rm.Range(func(name1, name2 string, _ ...string) bool {
 			_ = dm.AddLink(name1, name2, domain)
 			return true
 		})
-		return true
-	})
+	}
 }
 
 // Clear clears all stored data and resets the role manager to the initial state.
 func (dm *DomainManager) Clear() error {
-	dm.rmMap = &sync.Map{}
-	dm.matchingFuncCache = util.NewSyncLRUCache(100)
+	dm.rmMap = make(map[string]*RoleManagerImpl)
+	// Always reset the cache to avoid stale domain matching entries
+	// that could cause security issues when projects are moved between orgs
+	dm.matchingFuncCache = util.NewSyncLRUCache(10000)
 	return nil
 }
 
@@ -550,46 +647,144 @@ func (dm *DomainManager) Match(str string, pattern string) bool {
 }
 
 func (dm *DomainManager) rangeAffectedRoleManagers(domain string, fn func(rm *RoleManagerImpl)) {
-	if dm.domainMatchingFunc != nil {
-		dm.rmMap.Range(func(key, value interface{}) bool {
-			domain2 := key.(string)
-			if domain != domain2 && dm.Match(domain2, domain) {
-				fn(value.(*RoleManagerImpl))
-			}
-			return true
-		})
+	if dm.domainMatchingFunc == nil {
+		return
 	}
+
+	// Check cache first for affected domains
+	cacheKey := "affected::" + domain
+	if cached, ok := dm.matchingFuncCache.Get(cacheKey); ok {
+		for _, d := range cached.([]string) {
+			if rm, ok := dm.load(d); ok {
+				fn(rm)
+			}
+		}
+		return
+	}
+
+	// Fast path: use affectedDomainsFunc if available for O(1) lookup
+	// Only process domains that already have role managers
+	if dm.affectedDomainsFunc != nil {
+		affected := dm.affectedDomainsFunc(domain)
+		var actuallyAffected []string
+		for _, d := range affected {
+			if rm, ok := dm.load(d); ok {
+				actuallyAffected = append(actuallyAffected, d)
+				fn(rm)
+			}
+		}
+		dm.matchingFuncCache.Put(cacheKey, actuallyAffected)
+		return
+	}
+
+	// Fallback: iterate through all domains (O(n))
+	var affected []string
+	for domain2, value := range dm.rmMap {
+		if domain != domain2 && dm.Match(domain2, domain) {
+			affected = append(affected, domain2)
+			fn(value)
+		}
+	}
+
+	dm.matchingFuncCache.Put(cacheKey, affected)
+}
+
+// getOrCreateRoleManagers gets or creates role managers for multiple domains in a single lock acquisition
+func (dm *DomainManager) getOrCreateRoleManagers(domains []string) []*RoleManagerImpl {
+	if len(domains) == 0 {
+		return nil
+	}
+
+	// First, try to get existing role managers without the write lock
+	dm.mu.RLock()
+	rms := make([]*RoleManagerImpl, 0, len(domains))
+	var missing []string
+	for _, d := range domains {
+		if rm, ok := dm.rmMap[d]; ok {
+			rms = append(rms, rm)
+		} else {
+			missing = append(missing, d)
+		}
+	}
+	dm.mu.RUnlock()
+
+	// If all role managers exist, return immediately
+	if len(missing) == 0 {
+		return rms
+	}
+
+	// Create missing role managers with write lock
+	dm.mu.Lock()
+	for _, d := range missing {
+		// Double-check in case another goroutine created it
+		if rm, ok := dm.rmMap[d]; ok {
+			rms = append(rms, rm)
+		} else {
+			rm := newRoleManagerWithMatchingFunc(dm.maxHierarchyLevel, dm.matchingFunc)
+			dm.rmMap[d] = rm
+			rms = append(rms, rm)
+		}
+	}
+	dm.mu.Unlock()
+
+	return rms
 }
 
 func (dm *DomainManager) load(name interface{}) (value *RoleManagerImpl, ok bool) {
-	if r, ok := dm.rmMap.Load(name); ok {
-		return r.(*RoleManagerImpl), true
+	r, ok := dm.rmMap[name.(string)]
+	if ok {
+		return r, true
 	}
+
 	return nil, false
 }
 
 // load or create a RoleManager instance of domain.
+// If store is false and domain doesn't exist, returns an empty RoleManager
+// load or create a RoleManager instance of domain.
 func (dm *DomainManager) getRoleManager(domain string, store bool) *RoleManagerImpl {
+	dm.mu.Lock()
+	defer dm.mu.Unlock()
+
 	var rm *RoleManagerImpl
 	var ok bool
 
-	if rm, ok = dm.load(domain); !ok {
+	if rm, ok = dm.loadLocked(domain); !ok {
 		rm = newRoleManagerWithMatchingFunc(dm.maxHierarchyLevel, dm.matchingFunc)
 		if store {
-			dm.rmMap.Store(domain, rm)
+			dm.rmMap[domain] = rm
 		}
-		if dm.domainMatchingFunc != nil {
-			dm.rmMap.Range(func(key, value interface{}) bool {
-				domain2 := key.(string)
-				rm2 := value.(*RoleManagerImpl)
-				if domain != domain2 && dm.Match(domain, domain2) {
-					rm.copyFrom(rm2)
+		// Skip copyFrom if skipCopyOnCreate is enabled for performance optimization
+		// In this mode, inheritance is handled via rangeAffectedRoleManagers during AddLink
+		if dm.domainMatchingFunc != nil && !dm.skipCopyOnCreate {
+			// Fast path: use parentDomainsFunc if available for O(1) lookup
+			if dm.parentDomainsFunc != nil {
+				parents := dm.parentDomainsFunc(domain)
+				for _, parentDomain := range parents {
+					if rm2, ok := dm.rmMap[parentDomain]; ok && parentDomain != domain {
+						rm.copyFrom(rm2)
+					}
 				}
-				return true
-			})
+			} else {
+				// Fallback: iterate through all domains (O(n))
+				for domain2, rm2 := range dm.rmMap {
+					if domain != domain2 && dm.Match(domain, domain2) {
+						rm.copyFrom(rm2)
+					}
+				}
+			}
 		}
 	}
 	return rm
+}
+
+// loadLocked loads from rmMap without acquiring mutex (caller must hold it)
+func (dm *DomainManager) loadLocked(domain string) (value *RoleManagerImpl, ok bool) {
+	r, ok := dm.rmMap[domain]
+	if ok {
+		return r, true
+	}
+	return nil, false
 }
 
 // AddLink adds the inheritance link between role: name1 and role: name2.
@@ -631,7 +826,28 @@ func (dm *DomainManager) HasLink(name1 string, name2 string, domains ...string) 
 		return false, err
 	}
 	rm := dm.getRoleManager(domain, false)
-	return rm.HasLink(name1, name2, domains...)
+	hasLink, err := rm.HasLink(name1, name2, domains...)
+	if err != nil {
+		return false, err
+	}
+	if hasLink {
+		return true, nil
+	}
+
+	// If not found and we have a parentDomainsFunc, check parent domains
+	// This enables lazy inheritance when skipCopyOnCreate is true
+	if dm.parentDomainsFunc != nil {
+		parents := dm.parentDomainsFunc(domain)
+		for _, parentDomain := range parents {
+			if parentRM, ok := dm.load(parentDomain); ok {
+				if hasLink, _ := parentRM.HasLink(name1, name2); hasLink {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	return false, nil
 }
 
 // GetRoles gets the roles that a subject inherits.
@@ -657,13 +873,10 @@ func (dm *DomainManager) GetUsers(name string, domains ...string) ([]string, err
 func (dm *DomainManager) toString() []string {
 	var roles []string
 
-	dm.rmMap.Range(func(key, value interface{}) bool {
-		domain := key.(string)
-		rm := value.(*RoleManagerImpl)
+	for domain, rm := range dm.rmMap {
 		domainRoles := rm.toString()
 		roles = append(roles, fmt.Sprintf("%s: %s", domain, strings.Join(domainRoles, ", ")))
-		return true
-	})
+	}
 
 	return roles
 }
@@ -682,9 +895,8 @@ func (dm *DomainManager) PrintRoles() error {
 // GetDomains gets domains that a user has.
 func (dm *DomainManager) GetDomains(name string) ([]string, error) {
 	var domains []string
-	dm.rmMap.Range(func(key, value interface{}) bool {
-		domain := key.(string)
-		rm := value.(*RoleManagerImpl)
+
+	for domain, rm := range dm.rmMap {
 		role, created := rm.getRole(name)
 		if created {
 			defer rm.removeRole(role.name)
@@ -692,18 +904,18 @@ func (dm *DomainManager) GetDomains(name string) ([]string, error) {
 		if len(role.getUsers()) > 0 || len(role.getRoles()) > 0 {
 			domains = append(domains, domain)
 		}
-		return true
-	})
+	}
 	return domains, nil
 }
 
 // GetAllDomains gets all domains.
 func (dm *DomainManager) GetAllDomains() ([]string, error) {
 	var domains []string
-	dm.rmMap.Range(func(key, value interface{}) bool {
-		domains = append(domains, key.(string))
-		return true
-	})
+
+	for key := range dm.rmMap {
+		domains = append(domains, key)
+	}
+
 	return domains, nil
 }
 
@@ -909,10 +1121,13 @@ func NewConditionalDomainManager(maxHierarchyLevel int) *ConditionalDomainManage
 }
 
 func (cdm *ConditionalDomainManager) load(name interface{}) (value *ConditionalRoleManager, ok bool) {
-	if r, ok := cdm.rmMap.Load(name); ok {
-		return r.(*ConditionalRoleManager), true
+	r, ok := cdm.rmMap[name.(string)]
+	if !ok {
+		return nil, false
 	}
-	return nil, false
+
+	// Hacky
+	return &ConditionalRoleManager{RoleManagerImpl: *r}, true
 }
 
 // load or create a ConditionalRoleManager instance of domain.
@@ -923,17 +1138,15 @@ func (cdm *ConditionalDomainManager) getConditionalRoleManager(domain string, st
 	if rm, ok = cdm.load(domain); !ok {
 		rm = newConditionalRoleManagerWithMatchingFunc(cdm.maxHierarchyLevel, cdm.matchingFunc)
 		if store {
-			cdm.rmMap.Store(domain, rm)
+			cdm.rmMap[domain] = &rm.RoleManagerImpl
 		}
 		if cdm.domainMatchingFunc != nil {
-			cdm.rmMap.Range(func(key, value interface{}) bool {
-				domain2 := key.(string)
-				rm2 := value.(*ConditionalRoleManager)
+			for domain2, value := range cdm.rmMap {
+				rm2 := &ConditionalRoleManager{RoleManagerImpl: *value}
 				if domain != domain2 && cdm.Match(domain, domain2) {
 					rm.copyFrom(rm2)
 				}
-				return true
-			})
+			}
 		}
 	}
 	return rm
@@ -983,32 +1196,32 @@ func (cdm *ConditionalDomainManager) DeleteLink(name1 string, name2 string, doma
 
 // AddLinkConditionFunc is based on userName, roleName, add LinkConditionFunc.
 func (cdm *ConditionalDomainManager) AddLinkConditionFunc(userName, roleName string, fn rbac.LinkConditionFunc) {
-	cdm.rmMap.Range(func(key, value interface{}) bool {
-		value.(*ConditionalRoleManager).AddLinkConditionFunc(userName, roleName, fn)
-		return true
-	})
+	for _, value := range cdm.rmMap {
+		rm := &ConditionalRoleManager{RoleManagerImpl: *value}
+		rm.AddLinkConditionFunc(userName, roleName, fn)
+	}
 }
 
 // AddDomainLinkConditionFunc is based on userName, roleName, domain, add LinkConditionFunc.
 func (cdm *ConditionalDomainManager) AddDomainLinkConditionFunc(userName, roleName, domain string, fn rbac.LinkConditionFunc) {
-	cdm.rmMap.Range(func(key, value interface{}) bool {
-		value.(*ConditionalRoleManager).AddDomainLinkConditionFunc(userName, roleName, domain, fn)
-		return true
-	})
+	for _, value := range cdm.rmMap {
+		rm := &ConditionalRoleManager{RoleManagerImpl: *value}
+		rm.AddDomainLinkConditionFunc(userName, roleName, domain, fn)
+	}
 }
 
 // SetLinkConditionFuncParams sets parameters of LinkConditionFunc based on userName, roleName.
 func (cdm *ConditionalDomainManager) SetLinkConditionFuncParams(userName, roleName string, params ...string) {
-	cdm.rmMap.Range(func(key, value interface{}) bool {
-		value.(*ConditionalRoleManager).SetLinkConditionFuncParams(userName, roleName, params...)
-		return true
-	})
+	for _, value := range cdm.rmMap {
+		rm := &ConditionalRoleManager{RoleManagerImpl: *value}
+		rm.SetLinkConditionFuncParams(userName, roleName, params...)
+	}
 }
 
 // SetDomainLinkConditionFuncParams sets parameters of LinkConditionFunc based on userName, roleName, domain.
 func (cdm *ConditionalDomainManager) SetDomainLinkConditionFuncParams(userName, roleName, domain string, params ...string) {
-	cdm.rmMap.Range(func(key, value interface{}) bool {
-		value.(*ConditionalRoleManager).SetDomainLinkConditionFuncParams(userName, roleName, domain, params...)
-		return true
-	})
+	for _, value := range cdm.rmMap {
+		rm := &ConditionalRoleManager{RoleManagerImpl: *value}
+		rm.SetDomainLinkConditionFuncParams(userName, roleName, domain, params...)
+	}
 }

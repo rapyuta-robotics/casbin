@@ -916,6 +916,48 @@ func (e *Enforcer) AddNamedDomainMatchingFunc(ptype, name string, fn rbac.Matchi
 	return false
 }
 
+// SetNamedDomainMatchingFunc sets the domain matching function without triggering a rebuild.
+// Use this when you want to set the matching function before calling BuildRoleLinks manually.
+func (e *Enforcer) SetNamedDomainMatchingFunc(ptype string, fn rbac.MatchingFunc) bool {
+	if rm, ok := e.rmMap[ptype]; ok {
+		rm.SetDomainMatchingFunc(fn)
+		return true
+	}
+	return false
+}
+
+// SetNamedAffectedDomainsFunc sets a function that returns affected domains directly,
+// enabling O(1) lookup instead of O(n) iteration during role link building.
+// This is an optimization for systems with many domains and hierarchical matching.
+func (e *Enforcer) SetNamedAffectedDomainsFunc(ptype string, fn rbac.AffectedDomainsFunc) bool {
+	if rm, ok := e.rmMap[ptype]; ok {
+		rm.SetAffectedDomainsFunc(fn)
+		return true
+	}
+	return false
+}
+
+// SetNamedParentDomainsFunc sets a function that returns parent domains that a domain
+// should inherit from, enabling O(1) lookup instead of O(n) iteration during role manager creation.
+// This is an optimization for systems with many domains and hierarchical matching.
+func (e *Enforcer) SetNamedParentDomainsFunc(ptype string, fn rbac.AffectedDomainsFunc) bool {
+	if rm, ok := e.rmMap[ptype]; ok {
+		rm.SetParentDomainsFunc(fn)
+		return true
+	}
+	return false
+}
+
+// SetNamedSkipCopyOnCreate enables skipping role copying when creating new domain role managers.
+// This is a performance optimization when inheritance is handled via matching functions.
+func (e *Enforcer) SetNamedSkipCopyOnCreate(ptype string, skip bool) bool {
+	if rm, ok := e.rmMap[ptype]; ok {
+		rm.SetSkipCopyOnCreate(skip)
+		return true
+	}
+	return false
+}
+
 // AddNamedLinkConditionFunc Add condition function fn for Link userName->roleName,
 // when fn returns true, Link is valid, otherwise invalid.
 func (e *Enforcer) AddNamedLinkConditionFunc(ptype, user, role string, fn rbac.LinkConditionFunc) bool {
